@@ -1,0 +1,38 @@
+name: pipeline-cron
+
+# Free alternative to Vercel Cron (Hobby only allows daily crons).
+# Hits the protected pipeline endpoints on a schedule.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   APP_URL      e.g. https://your-app.vercel.app   (no trailing slash)
+#   CRON_SECRET  must match the CRON_SECRET env var set in Vercel
+#
+# Until APP_URL is set, runs are a no-op (no failures/emails).
+# Note: GitHub disables scheduled workflows after 60 days of repo inactivity.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # every 15 min (UTC); GitHub may delay under load
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ingest new items
+        run: |
+          if [ -z "${{ secrets.APP_URL }}" ]; then
+            echo "APP_URL not configured — skipping."; exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/ingest"
+
+      - name: Process pending items
+        run: |
+          if [ -z "${{ secrets.APP_URL }}" ]; then
+            echo "APP_URL not configured — skipping."; exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/process"

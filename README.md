@@ -137,12 +137,16 @@ licensed bridge). Swapping in the official API touches only
 
 5. **Deploy.** Done.
 
-6. **Cron.** `vercel.json` schedules `/api/cron/ingest` (every 15 min) and
-   `/api/cron/process` (every 5 min); both require the `CRON_SECRET` env var,
-   which Vercel attaches automatically as `Authorization: Bearer …`.
-   - On the **Hobby** plan, Vercel Cron runs **once per day** max. For the 5/15-min
-     cadence, use **Pro**, or trigger the endpoints from an external scheduler
-     (e.g. cron-job.org) with `Authorization: Bearer <CRON_SECRET>`.
+6. **Scheduling (free).** Vercel **Hobby** only allows once-a-day cron, so the
+   pipeline is scheduled from **GitHub Actions** instead — see
+   [`.github/workflows/cron.yml`](.github/workflows/cron.yml) (every 15 min).
+   Add two repo secrets (Settings → Secrets and variables → Actions):
+   | Secret | Value |
+   |---|---|
+   | `APP_URL` | your deployment URL, e.g. `https://your-app.vercel.app` (no trailing slash) |
+   | `CRON_SECRET` | the **same** value you set in Vercel |
+   - On **Vercel Pro** you can use native Vercel Cron instead — add a `vercel.json`
+     with `{"crons":[{"path":"/api/cron/ingest","schedule":"*/15 * * * *"},{"path":"/api/cron/process","schedule":"*/5 * * * *"}]}`.
 
 7. (Optional) Set the Vercel function **region** close to your Neon region to cut
    DB latency.
@@ -170,6 +174,7 @@ src/
   components/                Feed, badges, verify panel, filters, ...
 db/schema.sql                Postgres schema (pgvector, pg_trgm, functions, triggers)
 scripts/                     migrate · seed · run-ingest · run-process
+.github/workflows/cron.yml   Free scheduler (hits the cron endpoints every 15 min)
 ```
 
 ## Roadmap ideas
