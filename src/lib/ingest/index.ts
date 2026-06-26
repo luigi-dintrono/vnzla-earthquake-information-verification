@@ -4,6 +4,7 @@ import type { Source, SourceType } from "@/lib/types";
 import type { Connector, RawItemInput } from "@/lib/ingest/types";
 import { fetchRss } from "./connectors/rss";
 import { fetchX } from "./connectors/x";
+import { isRelevant } from "@/lib/relevance";
 
 function connectorFor(type: SourceType): Connector | null {
   switch (type) {
@@ -72,6 +73,7 @@ async function insertItems(
 export interface IngestSummary {
   sources: number;
   fetched: number;
+  dropped: number; // off-topic / spam removed by the relevance gate
   inserted: number;
   skipped: number;
 }
@@ -99,7 +101,7 @@ export async function runIngest(options: IngestOptions = {}): Promise<IngestSumm
       : null;
 
   const sources = await query<Source>("SELECT * FROM sources WHERE active = true");
-  const summary: IngestSummary = { sources: 0, fetched: 0, inserted: 0, skipped: 0 };
+  const summary: IngestSummary = { sources: 0, fetched: 0, dropped: 0, inserted: 0, skipped: 0 };
 
   for (const source of sources) {
     const connector = connectorFor(source.type);
@@ -107,8 +109,11 @@ export async function runIngest(options: IngestOptions = {}): Promise<IngestSumm
     summary.sources++;
     try {
       const items = withinWindow(await connector(source), cutoffMs);
+      // Earthquake & emergencies only: drop off-topic / spam before storing.
+      const relevant = items.filter((it) => isRelevant(it.raw_text));
       summary.fetched += items.length;
-      const { inserted, skipped } = await insertItems(source, items);
+      summary.dropped += items.length - relevant.length;
+      const { inserted, skipped } = await insertItems(source, relevant);
       summary.inserted += inserted;
       summary.skipped += skipped;
     } catch (e) {
