@@ -1,10 +1,10 @@
 /**
  * Central environment access + capability flags.
  *
- * Server-only secrets (service role key, API keys, cookie/cron secrets) are
+ * Server-only secrets (DATABASE_URL, API keys, cookie/cron secrets) are
  * referenced here too, but Next.js only inlines `NEXT_PUBLIC_*` into the client
  * bundle — every other field resolves to `undefined` in the browser, so nothing
- * sensitive leaks. Still, only import the admin client / pipeline on the server.
+ * sensitive leaks. Still, only import the db layer / pipeline on the server.
  */
 
 const read = (key: string): string | undefined => {
@@ -13,9 +13,8 @@ const read = (key: string): string | undefined => {
 };
 
 export const env = {
-  supabaseUrl: read("NEXT_PUBLIC_SUPABASE_URL"),
-  supabaseAnonKey: read("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
-  supabaseServiceKey: read("SUPABASE_SERVICE_ROLE_KEY"),
+  // Neon (or any Postgres) connection string — use the POOLED endpoint.
+  databaseUrl: read("DATABASE_URL"),
 
   anthropicKey: read("ANTHROPIC_API_KEY"),
   anthropicModel: read("ANTHROPIC_MODEL") ?? "claude-haiku-4-5-20251001",
@@ -32,9 +31,6 @@ export const env = {
 /** Embedding dimension is fixed in the SQL schema (vector(1536)). */
 export const EMBEDDING_DIM = 1536;
 
-export const hasSupabase = (): boolean =>
-  Boolean(env.supabaseUrl && env.supabaseAnonKey);
-export const hasSupabaseAdmin = (): boolean =>
-  Boolean(env.supabaseUrl && env.supabaseServiceKey);
+export const hasDatabase = (): boolean => Boolean(env.databaseUrl);
 export const hasAnthropic = (): boolean => Boolean(env.anthropicKey);
 export const hasOpenAI = (): boolean => Boolean(env.openaiKey);

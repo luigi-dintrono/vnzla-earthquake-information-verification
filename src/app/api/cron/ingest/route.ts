@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isCronAuthorized } from "@/lib/cron";
-import { hasSupabaseAdmin } from "@/lib/env";
+import { hasDatabase } from "@/lib/env";
 import { runIngest } from "@/lib/ingest";
 
 export const runtime = "nodejs";
@@ -11,8 +11,8 @@ async function handle(req: Request) {
   if (!isCronAuthorized(req)) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
-  if (!hasSupabaseAdmin()) {
-    return NextResponse.json({ error: "Supabase no está configurado." }, { status: 503 });
+  if (!hasDatabase()) {
+    return NextResponse.json({ error: "La base de datos no está configurada." }, { status: 503 });
   }
   try {
     const summary = await runIngest();

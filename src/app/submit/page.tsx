@@ -1,6 +1,6 @@
 import { SubmitForm } from "@/components/SubmitForm";
 import { Notice } from "@/components/Notice";
-import { hasSupabase } from "@/lib/env";
+import { hasDatabase } from "@/lib/env";
 
 export const metadata = { title: "Reportar información" };
 
@@ -15,12 +15,12 @@ export default function SubmitPage() {
         </p>
       </header>
 
-      {hasSupabase() ? (
+      {hasDatabase() ? (
         <SubmitForm />
       ) : (
-        <Notice title="Configura Supabase para recibir reportes" tone="warn">
-          Agrega tus claves de Supabase en <code>.env.local</code> y ejecuta la migración. Mira el
-          README.
+        <Notice title="Configura la base de datos para recibir reportes" tone="warn">
+          Agrega tu <code>DATABASE_URL</code> de Neon en <code>.env.local</code> y ejecuta{" "}
+          <code>npm run db:migrate</code>. Mira el README.
         </Notice>
       )}
 

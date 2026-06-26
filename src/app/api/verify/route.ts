@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { ensureVoter } from "@/lib/identity";
-import { supabaseAdmin } from "@/lib/supabase/admin";
-import { hasSupabaseAdmin } from "@/lib/env";
+import { hasDatabase, query, queryOne } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,8 +14,8 @@ const Body = z.object({
 });
 
 export async function POST(req: Request) {
-  if (!hasSupabaseAdmin()) {
-    return NextResponse.json({ error: "Supabase no está configurado." }, { status: 503 });
+  if (!hasDatabase()) {
+    return NextResponse.json({ error: "La base de datos no está configurada." }, { status: 503 });
   }
 
   const json = await req.json().catch(() => null);
@@ -29,30 +28,28 @@ export async function POST(req: Request) {
   // Mints + sets the signed voter cookie on first vote. The unique constraint
   // (report_id, voter_hash) enforces one vote per device per report.
   const voter = await ensureVoter();
-  const db = supabaseAdmin();
 
-  const { error } = await db.from("verifications").upsert(
-    {
-      report_id: reportId,
-      voter_hash: voter.hash,
-      vote,
-      comment: comment?.trim() || null,
-      evidence_url: evidenceUrl?.trim() || null,
-    },
-    { onConflict: "report_id,voter_hash" },
-  );
-
-  if (error) {
-    console.error("[verify]", error.message);
+  try {
+    await query(
+      `INSERT INTO verifications (report_id, voter_hash, vote, comment, evidence_url)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (report_id, voter_hash)
+       DO UPDATE SET vote = EXCLUDED.vote,
+                     comment = EXCLUDED.comment,
+                     evidence_url = EXCLUDED.evidence_url,
+                     created_at = now()`,
+      [reportId, voter.hash, vote, comment?.trim() || null, evidenceUrl?.trim() || null],
+    );
+  } catch (e) {
+    console.error("[verify]", (e as Error).message);
     return NextResponse.json({ error: "No se pudo registrar tu verificación." }, { status: 500 });
   }
 
   // Counts + status are recomputed by a DB trigger; read the fresh values.
-  const { data: report } = await db
-    .from("reports")
-    .select("confirm_count, dispute_count, unsure_count, status")
-    .eq("id", reportId)
-    .single();
+  const report = await queryOne(
+    "SELECT confirm_count, dispute_count, unsure_count, status FROM reports WHERE id = $1",
+    [reportId],
+  );
 
   return NextResponse.json({ ok: true, vote, report });
 }

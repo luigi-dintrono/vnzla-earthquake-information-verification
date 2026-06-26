@@ -1,6 +1,6 @@
 import "./load-env";
-import { hasAnthropic, hasOpenAI, hasSupabaseAdmin } from "@/lib/env";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { hasAnthropic, hasDatabase, hasOpenAI } from "@/lib/env";
+import { getPool, query, queryOne } from "@/lib/db";
 import { processOne } from "@/lib/process";
 import type { RawItem, SourceType, VoteType } from "@/lib/types";
 
@@ -182,67 +182,50 @@ const EVENTS: EventSeed[] = [
   },
 ];
 
-async function clean(db: ReturnType<typeof supabaseAdmin>) {
+async function clean() {
   // Order respects FKs (cascades cover the rest).
   for (const table of ["verifications", "report_items", "reports", "raw_items", "sources"]) {
-    await db.from(table).delete().gte("created_at", "1900-01-01");
+    await query(`DELETE FROM ${table} WHERE created_at >= '1900-01-01'`);
   }
 }
 
-async function insertSources(db: ReturnType<typeof supabaseAdmin>): Promise<Record<SourceKey, string>> {
-  const rows = (Object.entries(SOURCES) as [SourceKey, (typeof SOURCES)[SourceKey]][]).map(
-    ([, s]) => ({ type: s.type, name: s.name, url: s.url, handle: s.handle ?? null }),
-  );
-  const { data, error } = await db.from("sources").insert(rows).select("id, name");
-  if (error) throw error;
-
-  const byName = new Map<string, string>((data ?? []).map((r) => [r.name as string, r.id as string]));
+async function insertSources(): Promise<Record<SourceKey, string>> {
   const map = {} as Record<SourceKey, string>;
   for (const key of Object.keys(SOURCES) as SourceKey[]) {
-    map[key] = byName.get(SOURCES[key].name)!;
+    const s = SOURCES[key];
+    const row = await queryOne<{ id: string }>(
+      "INSERT INTO sources (type, name, url, handle) VALUES ($1, $2, $3, $4) RETURNING id",
+      [s.type, s.name, s.url, s.handle ?? null],
+    );
+    map[key] = row!.id;
   }
   return map;
 }
 
-async function applyVotes(
-  db: ReturnType<typeof supabaseAdmin>,
-  reportId: string,
-  ev: EventSeed,
-) {
-  const rows: {
-    report_id: string;
-    voter_hash: string;
-    vote: VoteType;
-    comment: string | null;
-    evidence_url: string | null;
-  }[] = [];
-
+async function applyVotes(reportId: string, ev: EventSeed) {
   for (const vote of ["confirm", "dispute", "unsure"] as VoteType[]) {
     const n = ev.votes?.[vote] ?? 0;
     const c = ev.comments?.[vote];
     for (let i = 0; i < n; i++) {
-      rows.push({
-        report_id: reportId,
-        voter_hash: `seed-${ev.key}-${vote}-${i}`,
-        vote,
-        comment: i === 0 && c ? c.text : null,
-        evidence_url: i === 0 && c?.evidence ? c.evidence : null,
-      });
+      await query(
+        "INSERT INTO verifications (report_id, voter_hash, vote, comment, evidence_url) VALUES ($1, $2, $3, $4, $5)",
+        [
+          reportId,
+          `seed-${ev.key}-${vote}-${i}`,
+          vote,
+          i === 0 && c ? c.text : null,
+          i === 0 && c?.evidence ? c.evidence : null,
+        ],
+      );
     }
-  }
-
-  if (rows.length) {
-    const { error } = await db.from("verifications").insert(rows);
-    if (error) throw error;
   }
 }
 
 async function main() {
-  if (!hasSupabaseAdmin()) {
+  if (!hasDatabase()) {
     console.error(
-      "✗ Supabase admin no está configurado.\n" +
-        "  Define NEXT_PUBLIC_SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en .env.local,\n" +
-        "  y ejecuta la migración supabase/migrations/0001_init.sql antes de sembrar.",
+      "✗ DATABASE_URL no está configurada.\n" +
+        "  Define DATABASE_URL (Neon, pooled) en .env.local y ejecuta `npm run db:migrate` antes de sembrar.",
     );
     process.exit(1);
   }
@@ -252,13 +235,11 @@ async function main() {
       `dedup: ${hasOpenAI() ? "embeddings (pgvector)" : "trigram (pg_trgm)"}`,
   );
 
-  const db = supabaseAdmin();
-
   console.log("Limpiando datos previos…");
-  await clean(db);
+  await clean();
 
   console.log("Insertando fuentes…");
-  const sources = await insertSources(db);
+  const sources = await insertSources();
 
   let created = 0;
   let matched = 0;
@@ -270,42 +251,35 @@ async function main() {
       const v = ev.variants[i];
       const capturedAt = new Date(Date.now() - ev.minutesAgo * 60_000 + i * 90_000).toISOString();
 
-      const { data: item, error } = await db
-        .from("raw_items")
-        .insert({
-          source_id: sources[v.source],
-          external_id: `seed-${ev.key}-${i}`,
-          author: v.author,
-          raw_text: v.text,
-          raw_url: v.url ?? null,
-          lang: "es",
-          captured_at: capturedAt,
-          status: "pending",
-        })
-        .select("*")
-        .single();
-      if (error) throw error;
+      const item = await queryOne<RawItem>(
+        `INSERT INTO raw_items (source_id, external_id, author, raw_text, raw_url, lang, captured_at, status)
+         VALUES ($1, $2, $3, $4, $5, 'es', $6, 'pending')
+         RETURNING *`,
+        [sources[v.source], `seed-${ev.key}-${i}`, v.author, v.text, v.url ?? null, capturedAt],
+      );
 
-      const outcome = await processOne(item as RawItem, db);
+      const outcome = await processOne(item!);
       if (outcome.matched) matched++;
       else created++;
       if (!firstReportId) firstReportId = outcome.reportId;
     }
 
-    if (firstReportId) await applyVotes(db, firstReportId, ev);
+    if (firstReportId) await applyVotes(firstReportId, ev);
     console.log(`  ✓ evento "${ev.key}" (${ev.variants.length} fuentes)`);
   }
 
-  const { count } = await db.from("reports").select("*", { count: "exact", head: true });
+  const row = await queryOne<{ count: number }>("SELECT count(*)::int AS count FROM reports");
   console.log(
-    `\nListo. ${EVENTS.length} eventos sembrados → ${count} reportes ` +
+    `\nListo. ${EVENTS.length} eventos sembrados → ${row?.count ?? 0} reportes ` +
       `(${created} nuevos, ${matched} agrupados por similitud).`,
   );
   console.log("Abre http://localhost:3000 después de `npm run dev`.");
+
+  await getPool().end();
   process.exit(0);
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error("seed falló:", e);
   process.exit(1);
 });

@@ -1,4 +1,4 @@
-import { supabaseRead } from "@/lib/supabase/read";
+import { hasDatabase, query, queryOne } from "@/lib/db";
 import type {
   Report,
   ReportCategory,
@@ -21,130 +21,141 @@ export interface FeedFilters {
 }
 
 export async function getFeed(filters: FeedFilters = {}): Promise<Report[]> {
-  const db = supabaseRead();
-  if (!db) return [];
+  if (!hasDatabase()) return [];
 
-  let query = db.from("reports").select("*").limit(filters.limit ?? 60);
+  const where: string[] = [];
+  const params: unknown[] = [];
+  let i = 1;
 
-  if (filters.category) query = query.eq("category", filters.category);
-  if (filters.status) query = query.eq("status", filters.status);
-  if (filters.state) query = query.eq("state", filters.state);
+  if (filters.category) {
+    where.push(`category = $${i++}`);
+    params.push(filters.category);
+  }
+  if (filters.status) {
+    where.push(`status = $${i++}`);
+    params.push(filters.status);
+  }
+  if (filters.state) {
+    where.push(`state = $${i++}`);
+    params.push(filters.state);
+  }
   if (filters.q) {
-    const q = filters.q.replace(/[%,]/g, " ").trim();
+    const q = filters.q.trim();
     if (q) {
-      query = query.or(
-        `title.ilike.%${q}%,summary.ilike.%${q}%,location_text.ilike.%${q}%,building_name.ilike.%${q}%`,
+      where.push(
+        `(title ILIKE $${i} OR summary ILIKE $${i} OR location_text ILIKE $${i} OR building_name ILIKE $${i})`,
       );
+      params.push(`%${q}%`);
+      i++;
     }
   }
 
-  switch (filters.sort ?? "recent") {
-    case "corroborated":
-      query = query.order("report_count", { ascending: false }).order("last_seen_at", { ascending: false });
-      break;
-    case "discussed":
-      query = query.order("confirm_count", { ascending: false }).order("dispute_count", { ascending: false });
-      break;
-    default:
-      query = query.order("last_seen_at", { ascending: false });
-  }
+  const orderBy =
+    filters.sort === "corroborated"
+      ? "report_count DESC, last_seen_at DESC"
+      : filters.sort === "discussed"
+        ? "confirm_count DESC, dispute_count DESC"
+        : "last_seen_at DESC";
 
-  const { data, error } = await query;
-  if (error) {
-    console.error("[queries.getFeed]", error.message);
+  params.push(filters.limit ?? 60);
+  const sql = `SELECT * FROM reports ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY ${orderBy} LIMIT $${i}`;
+
+  try {
+    return await query<Report>(sql, params);
+  } catch (e) {
+    console.error("[queries.getFeed]", (e as Error).message);
     return [];
   }
-  return (data as Report[]) ?? [];
 }
 
 export async function getReport(id: string): Promise<Report | null> {
-  const db = supabaseRead();
-  if (!db) return null;
-  const { data, error } = await db.from("reports").select("*").eq("id", id).maybeSingle();
-  if (error) {
-    console.error("[queries.getReport]", error.message);
+  if (!hasDatabase()) return null;
+  try {
+    return await queryOne<Report>("SELECT * FROM reports WHERE id = $1", [id]);
+  } catch (e) {
+    console.error("[queries.getReport]", (e as Error).message);
     return null;
   }
-  return (data as Report) ?? null;
+}
+
+interface SourceRow {
+  raw_item_id: string;
+  similarity: number | null;
+  author: string | null;
+  raw_url: string | null;
+  captured_at: string | null;
+  source_name: string | null;
+  source_type: SourceType | null;
 }
 
 export async function getReportSources(id: string): Promise<ReportSource[]> {
-  const db = supabaseRead();
-  if (!db) return [];
-  const { data, error } = await db
-    .from("report_items")
-    .select(
-      "raw_item_id, similarity, raw_items(author, raw_url, captured_at, source_id, sources(name, type))",
-    )
-    .eq("report_id", id)
-    .order("similarity", { ascending: false });
-
-  if (error) {
-    console.error("[queries.getReportSources]", error.message);
+  if (!hasDatabase()) return [];
+  try {
+    const rows = await query<SourceRow>(
+      `SELECT ri.raw_item_id, ri.similarity, it.author, it.raw_url, it.captured_at,
+              s.name AS source_name, s.type AS source_type
+       FROM report_items ri
+       JOIN raw_items it ON it.id = ri.raw_item_id
+       LEFT JOIN sources s ON s.id = it.source_id
+       WHERE ri.report_id = $1
+       ORDER BY ri.similarity DESC NULLS LAST`,
+      [id],
+    );
+    return rows.map((r) => ({
+      raw_item_id: r.raw_item_id,
+      similarity: r.similarity,
+      author: r.author,
+      raw_url: r.raw_url,
+      captured_at: r.captured_at,
+      source_name: r.source_name,
+      source_type: (r.source_type ?? "other") as SourceType,
+    }));
+  } catch (e) {
+    console.error("[queries.getReportSources]", (e as Error).message);
     return [];
   }
-
-  // PostgREST returns nested relations; normalize the shape.
-  return ((data as unknown as RawJoin[]) ?? []).map((row) => ({
-    raw_item_id: row.raw_item_id,
-    similarity: row.similarity,
-    author: row.raw_items?.author ?? null,
-    raw_url: row.raw_items?.raw_url ?? null,
-    captured_at: row.raw_items?.captured_at ?? null,
-    source_name: row.raw_items?.sources?.name ?? null,
-    source_type: (row.raw_items?.sources?.type ?? "other") as SourceType,
-  }));
-}
-
-interface RawJoin {
-  raw_item_id: string;
-  similarity: number | null;
-  raw_items: {
-    author: string | null;
-    raw_url: string | null;
-    captured_at: string | null;
-    source_id: string | null;
-    sources: { name: string | null; type: SourceType | null } | null;
-  } | null;
 }
 
 export async function getReportComments(id: string, limit = 20): Promise<Verification[]> {
-  const db = supabaseRead();
-  if (!db) return [];
-  const { data, error } = await db
-    .from("verifications")
-    .select("id, report_id, vote, comment, evidence_url, created_at, voter_hash")
-    .eq("report_id", id)
-    .not("comment", "is", null)
-    .order("created_at", { ascending: false })
-    .limit(limit);
-  if (error) {
-    console.error("[queries.getReportComments]", error.message);
+  if (!hasDatabase()) return [];
+  try {
+    return await query<Verification>(
+      `SELECT id, report_id, voter_hash, vote, comment, evidence_url, created_at
+       FROM verifications
+       WHERE report_id = $1 AND comment IS NOT NULL
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [id, limit],
+    );
+  } catch (e) {
+    console.error("[queries.getReportComments]", (e as Error).message);
     return [];
   }
-  return (data as Verification[]) ?? [];
 }
 
 export async function getMyVote(reportId: string, voterHash: string | null): Promise<VoteType | null> {
-  if (!voterHash) return null;
-  const db = supabaseRead();
-  if (!db) return null;
-  const { data } = await db
-    .from("verifications")
-    .select("vote")
-    .eq("report_id", reportId)
-    .eq("voter_hash", voterHash)
-    .maybeSingle();
-  return (data?.vote as VoteType) ?? null;
+  if (!voterHash || !hasDatabase()) return null;
+  try {
+    const row = await queryOne<{ vote: VoteType }>(
+      "SELECT vote FROM verifications WHERE report_id = $1 AND voter_hash = $2",
+      [reportId, voterHash],
+    );
+    return row?.vote ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function getStates(): Promise<string[]> {
-  const db = supabaseRead();
-  if (!db) return [];
-  const { data } = await db.from("reports").select("state").not("state", "is", null).limit(1000);
-  const set = new Set<string>();
-  for (const row of (data as { state: string }[]) ?? []) set.add(row.state);
-  return [...set].sort((a, b) => a.localeCompare(b, "es"));
+  if (!hasDatabase()) return [];
+  try {
+    const rows = await query<{ state: string }>(
+      "SELECT DISTINCT state FROM reports WHERE state IS NOT NULL ORDER BY state",
+    );
+    return rows.map((r) => r.state);
+  } catch {
+    return [];
+  }
 }
 
 export interface Stats {
@@ -155,20 +166,19 @@ export interface Stats {
 }
 
 export async function getStats(): Promise<Stats> {
-  const db = supabaseRead();
-  if (!db) return { reports: 0, verified: 0, sources: 0, verifications: 0 };
-
-  const [reports, verified, sources, verifications] = await Promise.all([
-    db.from("reports").select("*", { count: "exact", head: true }),
-    db.from("reports").select("*", { count: "exact", head: true }).eq("status", "verified"),
-    db.from("sources").select("*", { count: "exact", head: true }),
-    db.from("verifications").select("*", { count: "exact", head: true }),
-  ]);
-
-  return {
-    reports: reports.count ?? 0,
-    verified: verified.count ?? 0,
-    sources: sources.count ?? 0,
-    verifications: verifications.count ?? 0,
-  };
+  const empty = { reports: 0, verified: 0, sources: 0, verifications: 0 };
+  if (!hasDatabase()) return empty;
+  try {
+    const row = await queryOne<Stats>(
+      `SELECT
+         (SELECT count(*) FROM reports)::int AS reports,
+         (SELECT count(*) FROM reports WHERE status = 'verified')::int AS verified,
+         (SELECT count(*) FROM sources)::int AS sources,
+         (SELECT count(*) FROM verifications)::int AS verifications`,
+    );
+    return row ?? empty;
+  } catch (e) {
+    console.error("[queries.getStats]", (e as Error).message);
+    return empty;
+  }
 }

@@ -1,5 +1,5 @@
 /**
- * Domain types — mirror the Postgres schema in supabase/migrations/0001_init.sql.
+ * Domain types — mirror the Postgres schema in db/schema.sql.
  * Spanish display labels live alongside each enum (the UI is Spanish-first).
  */
 

@@ -1,6 +1,5 @@
 import { createHash } from "crypto";
-import type { SupabaseClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { query, queryOne } from "@/lib/db";
 import type { Source, SourceType } from "@/lib/types";
 import type { Connector, RawItemInput } from "@/lib/ingest/types";
 import { fetchRss } from "./connectors/rss";
@@ -28,7 +27,6 @@ function externalIdFor(input: RawItemInput): string {
 }
 
 async function insertItems(
-  db: SupabaseClient,
   source: Source,
   items: RawItemInput[],
 ): Promise<{ inserted: number; skipped: number }> {
@@ -37,35 +35,34 @@ async function insertItems(
 
   for (const it of items) {
     const external_id = externalIdFor(it);
-    const { data: existing } = await db
-      .from("raw_items")
-      .select("id")
-      .eq("source_id", source.id)
-      .eq("external_id", external_id)
-      .maybeSingle();
-
+    const existing = await queryOne(
+      "SELECT id FROM raw_items WHERE source_id = $1 AND external_id = $2 LIMIT 1",
+      [source.id, external_id],
+    );
     if (existing) {
       skipped++;
       continue;
     }
 
-    const { error } = await db.from("raw_items").insert({
-      source_id: source.id,
-      external_id,
-      author: it.author ?? null,
-      raw_text: it.raw_text,
-      raw_url: it.raw_url ?? null,
-      lang: it.lang ?? null,
-      media: it.media ?? [],
-      captured_at: it.captured_at ?? null,
-      status: "pending",
-    });
-
-    if (error) {
-      skipped++;
-      console.error(`[ingest] insert failed for "${source.name}":`, error.message);
-    } else {
+    try {
+      await query(
+        `INSERT INTO raw_items (source_id, external_id, author, raw_text, raw_url, lang, media, captured_at, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'pending')`,
+        [
+          source.id,
+          external_id,
+          it.author ?? null,
+          it.raw_text,
+          it.raw_url ?? null,
+          it.lang ?? null,
+          JSON.stringify(it.media ?? []),
+          it.captured_at ?? null,
+        ],
+      );
       inserted++;
+    } catch (e) {
+      skipped++;
+      console.error(`[ingest] insert failed for "${source.name}":`, (e as Error).message);
     }
   }
 
@@ -81,11 +78,7 @@ export interface IngestSummary {
 
 /** Crawl all active sources and stage new items as pending raw_items. */
 export async function runIngest(): Promise<IngestSummary> {
-  const db = supabaseAdmin();
-  const { data, error } = await db.from("sources").select("*").eq("active", true);
-  if (error) throw error;
-
-  const sources = (data as Source[]) ?? [];
+  const sources = await query<Source>("SELECT * FROM sources WHERE active = true");
   const summary: IngestSummary = { sources: 0, fetched: 0, inserted: 0, skipped: 0 };
 
   for (const source of sources) {
@@ -95,7 +88,7 @@ export async function runIngest(): Promise<IngestSummary> {
     try {
       const items = await connector(source);
       summary.fetched += items.length;
-      const { inserted, skipped } = await insertItems(db, source, items);
+      const { inserted, skipped } = await insertItems(source, items);
       summary.inserted += inserted;
       summary.skipped += skipped;
     } catch (e) {

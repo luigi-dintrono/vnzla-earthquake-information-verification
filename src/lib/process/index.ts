@@ -1,5 +1,4 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { query, queryOne } from "@/lib/db";
 import type { RawItem } from "@/lib/types";
 import { augment, type Augmented } from "@/lib/process/augment";
 import { embed } from "@/lib/process/embed";
@@ -27,37 +26,28 @@ interface MatchRow {
   similarity: number;
 }
 
-async function findMatch(
-  db: SupabaseClient,
-  augmented: Augmented,
-  embedding: number[] | null,
-): Promise<MatchRow | null> {
-  let rows: MatchRow[] = [];
-
-  if (embedding) {
-    const { data, error } = await db.rpc("match_reports", {
-      query_embedding: vecLiteral(embedding),
-      match_threshold: VECTOR_THRESHOLD,
-      match_count: 5,
-    });
-    if (error) throw error;
-    rows = (data as MatchRow[]) ?? [];
-  } else {
-    const { data, error } = await db.rpc("match_reports_trgm", {
-      query_text: augmented.canonical_text,
-      match_threshold: TRGM_THRESHOLD,
-      match_count: 5,
-    });
-    if (error) throw error;
-    rows = (data as MatchRow[]) ?? [];
-  }
+async function findMatch(augmented: Augmented, embedding: number[] | null): Promise<MatchRow | null> {
+  const rows = embedding
+    ? await query<MatchRow>("SELECT id, similarity FROM match_reports($1::vector, $2, $3)", [
+        vecLiteral(embedding),
+        VECTOR_THRESHOLD,
+        5,
+      ])
+    : await query<MatchRow>("SELECT id, similarity FROM match_reports_trgm($1, $2, $3)", [
+        augmented.canonical_text,
+        TRGM_THRESHOLD,
+        5,
+      ]);
 
   if (!rows.length) return null;
 
   // Same-state guard: don't merge events from different states.
   const ids = rows.map((r) => r.id);
-  const { data: reps } = await db.from("reports").select("id, state").in("id", ids);
-  const stateById = new Map<string, string | null>((reps ?? []).map((r) => [r.id, r.state]));
+  const stateRows = await query<{ id: string; state: string | null }>(
+    "SELECT id, state FROM reports WHERE id = ANY($1::uuid[])",
+    [ids],
+  );
+  const stateById = new Map(stateRows.map((r) => [r.id, r.state]));
 
   for (const r of rows) {
     const candState = stateById.get(r.id);
@@ -68,104 +58,99 @@ async function findMatch(
 }
 
 async function attachToReport(
-  db: SupabaseClient,
   reportId: string,
   rawItem: RawItem,
   augmented: Augmented,
   embedding: number[] | null,
   similarity: number,
 ): Promise<void> {
-  await db.from("report_items").insert({
-    report_id: reportId,
-    raw_item_id: rawItem.id,
+  await query("INSERT INTO report_items (report_id, raw_item_id, similarity) VALUES ($1, $2, $3)", [
+    reportId,
+    rawItem.id,
     similarity,
-  });
+  ]);
+  await query("UPDATE raw_items SET status = 'processed', report_id = $1, similarity = $2 WHERE id = $3", [
+    reportId,
+    similarity,
+    rawItem.id,
+  ]);
 
-  await db
-    .from("raw_items")
-    .update({ status: "processed", report_id: reportId, similarity })
-    .eq("id", rawItem.id);
+  // Backfill any fields the existing report is missing; advance last_seen_at.
+  await query(
+    `UPDATE reports SET
+       summary       = COALESCE(summary, $2),
+       location_text = COALESCE(location_text, $3),
+       municipality  = COALESCE(municipality, $4),
+       state         = COALESCE(state, $5),
+       building_name = COALESCE(building_name, $6),
+       lat           = COALESCE(lat, $7),
+       lng           = COALESCE(lng, $8),
+       occurred_at   = COALESCE(occurred_at, $9),
+       severity      = COALESCE(severity, $10),
+       embedding     = COALESCE(embedding, $11::vector),
+       last_seen_at  = GREATEST(last_seen_at, $12::timestamptz),
+       updated_at    = now()
+     WHERE id = $1`,
+    [
+      reportId,
+      augmented.summary,
+      augmented.location_text,
+      augmented.municipality,
+      augmented.state,
+      augmented.building_name,
+      augmented.lat,
+      augmented.lng,
+      augmented.occurred_at,
+      augmented.severity,
+      vecLiteral(embedding),
+      rawItem.captured_at,
+    ],
+  );
 
-  // Backfill any fields the existing report is missing.
-  const { data: existing } = await db
-    .from("reports")
-    .select(
-      "last_seen_at, summary, location_text, municipality, state, building_name, lat, lng, occurred_at, severity, embedding",
-    )
-    .eq("id", reportId)
-    .single();
-
-  if (!existing) return;
-
-  const patch: Record<string, unknown> = { updated_at: nowIso() };
-  const fill = (key: string, current: unknown, next: unknown) => {
-    if ((current === null || current === undefined) && next !== null && next !== undefined) {
-      patch[key] = next;
-    }
-  };
-  fill("summary", existing.summary, augmented.summary);
-  fill("location_text", existing.location_text, augmented.location_text);
-  fill("municipality", existing.municipality, augmented.municipality);
-  fill("state", existing.state, augmented.state);
-  fill("building_name", existing.building_name, augmented.building_name);
-  fill("lat", existing.lat, augmented.lat);
-  fill("lng", existing.lng, augmented.lng);
-  fill("occurred_at", existing.occurred_at, augmented.occurred_at);
-  fill("severity", existing.severity, augmented.severity);
-  if (!existing.embedding && embedding) patch.embedding = vecLiteral(embedding);
-
-  const captured = rawItem.captured_at;
-  if (captured && captured > existing.last_seen_at) patch.last_seen_at = captured;
-
-  await db.from("reports").update(patch).eq("id", reportId);
-  await db.rpc("recount_report", { rid: reportId });
+  await query("SELECT recount_report($1)", [reportId]);
 }
 
 async function createReport(
-  db: SupabaseClient,
   rawItem: RawItem,
   augmented: Augmented,
   embedding: number[] | null,
 ): Promise<string> {
   const seen = rawItem.captured_at ?? nowIso();
-  const { data, error } = await db
-    .from("reports")
-    .insert({
-      title: augmented.title,
-      summary: augmented.summary,
-      canonical_text: augmented.canonical_text,
-      category: augmented.category,
-      status: "unverified",
-      location_text: augmented.location_text,
-      municipality: augmented.municipality,
-      state: augmented.state,
-      building_name: augmented.building_name,
-      lat: augmented.lat,
-      lng: augmented.lng,
-      severity: augmented.severity,
-      occurred_at: augmented.occurred_at,
-      embedding: vecLiteral(embedding),
-      report_count: 1,
-      source_count: 1,
-      first_seen_at: seen,
-      last_seen_at: seen,
-    })
-    .select("id")
-    .single();
+  const row = await queryOne<{ id: string }>(
+    `INSERT INTO reports
+       (title, summary, canonical_text, category, status, location_text, municipality, state,
+        building_name, lat, lng, severity, occurred_at, embedding, report_count, source_count,
+        first_seen_at, last_seen_at)
+     VALUES ($1, $2, $3, $4, 'unverified', $5, $6, $7, $8, $9, $10, $11, $12, $13::vector, 1, 1, $14, $14)
+     RETURNING id`,
+    [
+      augmented.title,
+      augmented.summary,
+      augmented.canonical_text,
+      augmented.category,
+      augmented.location_text,
+      augmented.municipality,
+      augmented.state,
+      augmented.building_name,
+      augmented.lat,
+      augmented.lng,
+      augmented.severity,
+      augmented.occurred_at,
+      vecLiteral(embedding),
+      seen,
+    ],
+  );
+  const reportId = row!.id;
 
-  if (error) throw error;
-  const reportId = data!.id as string;
-
-  await db.from("report_items").insert({
-    report_id: reportId,
-    raw_item_id: rawItem.id,
-    similarity: 1,
-  });
-  await db
-    .from("raw_items")
-    .update({ status: "processed", report_id: reportId, similarity: 1 })
-    .eq("id", rawItem.id);
-  await db.rpc("recount_report", { rid: reportId });
+  await query("INSERT INTO report_items (report_id, raw_item_id, similarity) VALUES ($1, $2, 1)", [
+    reportId,
+    rawItem.id,
+  ]);
+  await query("UPDATE raw_items SET status = 'processed', report_id = $1, similarity = 1 WHERE id = $2", [
+    reportId,
+    rawItem.id,
+  ]);
+  await query("SELECT recount_report($1)", [reportId]);
 
   return reportId;
 }
@@ -176,16 +161,16 @@ export interface ProcessOutcome {
   similarity: number;
 }
 
-export async function processOne(rawItem: RawItem, db: SupabaseClient = supabaseAdmin()): Promise<ProcessOutcome> {
+export async function processOne(rawItem: RawItem): Promise<ProcessOutcome> {
   const augmented = await augment(rawItem.raw_text, rawItem.captured_at);
   const embedding = await embed(augmented.canonical_text);
-  const match = await findMatch(db, augmented, embedding);
+  const match = await findMatch(augmented, embedding);
 
   if (match) {
-    await attachToReport(db, match.id, rawItem, augmented, embedding, match.similarity);
+    await attachToReport(match.id, rawItem, augmented, embedding, match.similarity);
     return { reportId: match.id, matched: true, similarity: match.similarity };
   }
-  const reportId = await createReport(db, rawItem, augmented, embedding);
+  const reportId = await createReport(rawItem, augmented, embedding);
   return { reportId, matched: false, similarity: 0 };
 }
 
@@ -198,28 +183,22 @@ export interface ProcessSummary {
 
 /** Process pending raw items (the "process" cron). */
 export async function processPending(limit = 50): Promise<ProcessSummary> {
-  const db = supabaseAdmin();
-  const { data, error } = await db
-    .from("raw_items")
-    .select("*")
-    .eq("status", "pending")
-    .order("created_at", { ascending: true })
-    .limit(limit);
-  if (error) throw error;
-
-  const items = (data as RawItem[]) ?? [];
+  const items = await query<RawItem>(
+    "SELECT * FROM raw_items WHERE status = 'pending' ORDER BY created_at ASC LIMIT $1",
+    [limit],
+  );
   const summary: ProcessSummary = { processed: 0, created: 0, matched: 0, failed: 0 };
 
   for (const item of items) {
     try {
-      const outcome = await processOne(item, db);
+      const outcome = await processOne(item);
       summary.processed++;
       if (outcome.matched) summary.matched++;
       else summary.created++;
     } catch (e) {
       summary.failed++;
       console.error(`[process] item ${item.id} failed:`, (e as Error).message);
-      await db.from("raw_items").update({ status: "rejected" }).eq("id", item.id);
+      await query("UPDATE raw_items SET status = 'rejected' WHERE id = $1", [item.id]).catch(() => {});
     }
   }
   return summary;
@@ -227,8 +206,7 @@ export async function processPending(limit = 50): Promise<ProcessSummary> {
 
 /** Process a single raw item by id (used right after a public submission). */
 export async function processRawItemById(id: string): Promise<ProcessOutcome | null> {
-  const db = supabaseAdmin();
-  const { data, error } = await db.from("raw_items").select("*").eq("id", id).single();
-  if (error || !data) return null;
-  return processOne(data as RawItem, db);
+  const item = await queryOne<RawItem>("SELECT * FROM raw_items WHERE id = $1", [id]);
+  if (!item) return null;
+  return processOne(item);
 }

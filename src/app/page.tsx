@@ -1,9 +1,9 @@
 import Link from "next/link";
 import { getFeed, getStates, getStats, type FeedFilters, type FeedSort } from "@/lib/queries";
-import { hasSupabase } from "@/lib/env";
+import { hasDatabase } from "@/lib/env";
 import { ReportCard } from "@/components/ReportCard";
 import { Filters } from "@/components/Filters";
-import { RealtimeRefresher } from "@/components/RealtimeRefresher";
+import { FeedAutoRefresh } from "@/components/FeedAutoRefresh";
 import { Notice } from "@/components/Notice";
 import { formatNumber } from "@/lib/format";
 import type { ReportCategory, ReportStatus } from "@/lib/types";
@@ -26,12 +26,12 @@ function Stat({ value, label }: { value: number; label: string }) {
 export default async function Home({ searchParams }: { searchParams: Promise<SP> }) {
   const sp = await searchParams;
 
-  if (!hasSupabase()) {
+  if (!hasDatabase()) {
     return (
-      <Notice title="Configura Supabase para empezar" tone="warn">
+      <Notice title="Configura la base de datos para empezar" tone="warn">
         <p>
-          Copia <code>.env.example</code> a <code>.env.local</code> y agrega tus claves de Supabase,
-          ejecuta la migración de <code>supabase/migrations/0001_init.sql</code> y luego{" "}
+          Copia <code>.env.example</code> a <code>.env.local</code> y agrega tu{" "}
+          <code>DATABASE_URL</code> de Neon, luego ejecuta <code>npm run db:migrate</code> y{" "}
           <code>npm run seed</code> para cargar datos de ejemplo. El README tiene el paso a paso.
         </p>
       </Notice>
@@ -66,8 +66,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<SP>
 
       <Filters states={states} />
 
-      <div className="flex justify-center">
-        <RealtimeRefresher />
+      <div className="flex justify-end">
+        <FeedAutoRefresh />
       </div>
 
       {reports.length === 0 ? (

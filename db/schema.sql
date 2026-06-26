@@ -1,11 +1,12 @@
 -- ============================================================================
--- VerificaVE — initial schema
+-- VerificaVE — database schema (Neon / Postgres)
 -- Crowdsourced earthquake-information verification for Venezuela.
 --
 -- Pipeline: connectors -> raw_items -> augment -> embed -> dedup -> reports
 --           reports -> crowd verification (one signed vote per device)
 --
--- Run on Supabase: paste into the SQL Editor, or `supabase db push`.
+-- Apply with:  npm run db:migrate   (runs this file against DATABASE_URL)
+-- Idempotent: safe to run more than once.
 -- ============================================================================
 
 create extension if not exists pgcrypto;   -- gen_random_uuid()
@@ -30,7 +31,7 @@ create table if not exists sources (
   name         text not null,
   url          text,
   handle       text,
-  trust_weight real not null default 1.0,   -- weighting for future ranking
+  trust_weight real not null default 1.0,
   active       boolean not null default true,
   config       jsonb not null default '{}'::jsonb,
   created_at   timestamptz not null default now()
@@ -42,17 +43,17 @@ create table if not exists sources (
 create table if not exists raw_items (
   id           uuid primary key default gen_random_uuid(),
   source_id    uuid references sources(id) on delete set null,
-  external_id  text,                      -- id at the source, to dedupe fetches
+  external_id  text,
   author       text,
   raw_text     text not null,
   raw_url      text,
   lang         text,
   media        jsonb not null default '[]'::jsonb,
-  captured_at  timestamptz,               -- when the source published it
-  submitted_by text,                      -- voter_hash, for public submissions
+  captured_at  timestamptz,
+  submitted_by text,
   status       item_status not null default 'pending',
-  report_id    uuid,                      -- set after dedup
-  similarity   real,                      -- match score to its report
+  report_id    uuid,
+  similarity   real,
   created_at   timestamptz not null default now()
 );
 create unique index if not exists raw_items_source_external_udx
@@ -67,21 +68,21 @@ create table if not exists reports (
   id             uuid primary key default gen_random_uuid(),
   title          text not null,
   summary        text,
-  canonical_text text not null,           -- normalized text used for matching
+  canonical_text text not null,
   category       report_category not null default 'other',
   status         report_status not null default 'unverified',
-  status_locked  boolean not null default false,  -- moderator override; freezes auto-status
+  status_locked  boolean not null default false,
   location_text  text,
   municipality   text,
-  state          text,                    -- estado (Sucre, Distrito Capital, ...)
+  state          text,
   building_name  text,
   lat            double precision,
   lng            double precision,
-  severity       smallint,                -- 1..5
+  severity       smallint,
   occurred_at    timestamptz,
-  embedding      vector(1536),            -- text-embedding-3-small dimension
-  report_count   int not null default 1,  -- # corroborating raw items
-  source_count   int not null default 1,  -- # distinct sources
+  embedding      vector(1536),
+  report_count   int not null default 1,
+  source_count   int not null default 1,
   confirm_count  int not null default 0,
   dispute_count  int not null default 0,
   unsure_count   int not null default 0,
@@ -108,7 +109,7 @@ create table if not exists report_items (
   raw_item_id uuid not null references raw_items(id) on delete cascade,
   similarity  real,
   created_at  timestamptz not null default now(),
-  unique (raw_item_id)                    -- a raw item belongs to one report
+  unique (raw_item_id)
 );
 create index if not exists report_items_report_idx on report_items (report_id);
 
@@ -131,7 +132,7 @@ create index if not exists verifications_report_idx on verifications (report_id)
 -- Functions
 -- ===========================================================================
 
--- Semantic match: nearest reports by cosine similarity (used when embeddings on)
+-- Semantic match: nearest reports by cosine similarity (embeddings configured)
 create or replace function match_reports(
   query_embedding vector(1536),
   match_threshold float default 0.82,
@@ -217,31 +218,3 @@ drop trigger if exists trg_refresh_report_votes on verifications;
 create trigger trg_refresh_report_votes
 after insert or update or delete on verifications
 for each row execute function refresh_report_votes();
-
--- ===========================================================================
--- Row Level Security
--- Public can READ canonical, deduplicated data. All writes go through the
--- service role (ingestion pipeline + verification route), which bypasses RLS.
--- ===========================================================================
-alter table sources       enable row level security;
-alter table raw_items     enable row level security;
-alter table reports       enable row level security;
-alter table report_items  enable row level security;
-alter table verifications enable row level security;
-
-do $$ begin create policy "read sources"       on sources       for select using (true); exception when duplicate_object then null; end $$;
-do $$ begin create policy "read raw_items"      on raw_items     for select using (true); exception when duplicate_object then null; end $$;
-do $$ begin create policy "read reports"        on reports       for select using (true); exception when duplicate_object then null; end $$;
-do $$ begin create policy "read report_items"   on report_items  for select using (true); exception when duplicate_object then null; end $$;
-do $$ begin create policy "read verifications"  on verifications for select using (true); exception when duplicate_object then null; end $$;
-
--- ===========================================================================
--- Realtime: stream new/updated reports to the live feed (Supabase only)
--- ===========================================================================
-do $$ begin
-  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
-    begin
-      alter publication supabase_realtime add table reports;
-    exception when duplicate_object then null; end;
-  end if;
-end $$;
