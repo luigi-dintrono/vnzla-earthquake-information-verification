@@ -31,13 +31,18 @@ jobs:
           # Fail on redirects/errors (e.g. Vercel auth) instead of passing silently.
           test "$code" = "200"
 
-      - name: Process pending items
+      - name: Process pending items (batched to stay under the function timeout)
         run: |
           if [ -z "${{ secrets.APP_URL }}" ]; then
             echo "APP_URL not configured — skipping."; exit 0
           fi
-          code=$(curl -sS -X POST -o /tmp/process.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/process")
-          echo "HTTP $code"; cat /tmp/process.json; echo
-          test "$code" = "200"
+          # Each call augments+dedups a small batch (<60s on Vercel Hobby);
+          # loop until nothing is pending, with a safety cap.
+          for i in $(seq 1 40); do
+            code=$(curl -sS -m 75 -X POST -o /tmp/p.json -w "%{http_code}" \
+              -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+              "${{ secrets.APP_URL }}/api/cron/process?limit=15")
+            echo "batch $i -> HTTP $code: $(cat /tmp/p.json)"
+            test "$code" = "200"
+            grep -q '"processed":0' /tmp/p.json && { echo "no more pending — done."; break; }
+          done
