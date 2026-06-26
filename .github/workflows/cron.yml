@@ -12,7 +12,7 @@ name: pipeline-cron
 
 on:
   schedule:
-    - cron: "0 */6 * * *" # every 6 hours (UTC); GitHub may delay under load
+    - cron: "27 */6 * * *" # every 6h at :27 — off-peak (GitHub delays/skips top-of-hour crons)
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
 jobs:
@@ -24,15 +24,20 @@ jobs:
           if [ -z "${{ secrets.APP_URL }}" ]; then
             echo "APP_URL not configured — skipping."; exit 0
           fi
-          curl -fsS -X POST \
+          code=$(curl -sS -X POST -o /tmp/ingest.json -w "%{http_code}" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/ingest"
+            "${{ secrets.APP_URL }}/api/cron/ingest")
+          echo "HTTP $code"; cat /tmp/ingest.json; echo
+          # Fail on redirects/errors (e.g. Vercel auth) instead of passing silently.
+          test "$code" = "200"
 
       - name: Process pending items
         run: |
           if [ -z "${{ secrets.APP_URL }}" ]; then
             echo "APP_URL not configured — skipping."; exit 0
           fi
-          curl -fsS -X POST \
+          code=$(curl -sS -X POST -o /tmp/process.json -w "%{http_code}" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.APP_URL }}/api/cron/process"
+            "${{ secrets.APP_URL }}/api/cron/process")
+          echo "HTTP $code"; cat /tmp/process.json; echo
+          test "$code" = "200"
