@@ -4,6 +4,7 @@ import type {
   ReportCategory,
   ReportSource,
   ReportStatus,
+  Source,
   SourceType,
   Verification,
   VoteType,
@@ -18,6 +19,8 @@ export interface FeedFilters {
   q?: string;
   sort?: FeedSort;
   limit?: number;
+  /** true = demo feed, false = real feed, undefined = both. */
+  demo?: boolean;
 }
 
 export async function getFeed(filters: FeedFilters = {}): Promise<Report[]> {
@@ -27,6 +30,10 @@ export async function getFeed(filters: FeedFilters = {}): Promise<Report[]> {
   const params: unknown[] = [];
   let i = 1;
 
+  if (filters.demo !== undefined) {
+    where.push(`is_demo = $${i++}`);
+    params.push(filters.demo);
+  }
   if (filters.category) {
     where.push(`category = $${i++}`);
     params.push(filters.category);
@@ -146,14 +153,42 @@ export async function getMyVote(reportId: string, voterHash: string | null): Pro
   }
 }
 
-export async function getStates(): Promise<string[]> {
+export async function getStates(demo?: boolean): Promise<string[]> {
   if (!hasDatabase()) return [];
   try {
-    const rows = await query<{ state: string }>(
-      "SELECT DISTINCT state FROM reports WHERE state IS NOT NULL ORDER BY state",
-    );
+    const rows =
+      demo === undefined
+        ? await query<{ state: string }>(
+            "SELECT DISTINCT state FROM reports WHERE state IS NOT NULL ORDER BY state",
+          )
+        : await query<{ state: string }>(
+            "SELECT DISTINCT state FROM reports WHERE state IS NOT NULL AND is_demo = $1 ORDER BY state",
+            [demo],
+          );
     return rows.map((r) => r.state);
   } catch {
+    return [];
+  }
+}
+
+export interface SourceOverview extends Source {
+  item_count: number;
+  last_item_at: string | null;
+}
+
+/** Every source plus how much we've crawled from it — powers the admin visibility list. */
+export async function getSourcesOverview(): Promise<SourceOverview[]> {
+  if (!hasDatabase()) return [];
+  try {
+    return await query<SourceOverview>(
+      `SELECT s.*,
+              (SELECT count(*) FROM raw_items ri WHERE ri.source_id = s.id)::int AS item_count,
+              (SELECT max(captured_at) FROM raw_items ri WHERE ri.source_id = s.id) AS last_item_at
+       FROM sources s
+       ORDER BY s.active DESC, s.trust_weight DESC, s.type, s.name`,
+    );
+  } catch (e) {
+    console.error("[queries.getSourcesOverview]", (e as Error).message);
     return [];
   }
 }
@@ -165,16 +200,21 @@ export interface Stats {
   verifications: number;
 }
 
-export async function getStats(): Promise<Stats> {
+export async function getStats(demo?: boolean): Promise<Stats> {
   const empty = { reports: 0, verified: 0, sources: 0, verifications: 0 };
   if (!hasDatabase()) return empty;
   try {
+    // Scope report/verification counts to the feed; "sources" = active sources
+    // that actually feed it (real feed = crawlable sources; demo = all).
     const row = await queryOne<Stats>(
       `SELECT
-         (SELECT count(*) FROM reports)::int AS reports,
-         (SELECT count(*) FROM reports WHERE status = 'verified')::int AS verified,
-         (SELECT count(*) FROM sources)::int AS sources,
-         (SELECT count(*) FROM verifications)::int AS verifications`,
+         (SELECT count(*) FROM reports WHERE ($1::boolean IS NULL OR is_demo = $1))::int AS reports,
+         (SELECT count(*) FROM reports WHERE status = 'verified' AND ($1::boolean IS NULL OR is_demo = $1))::int AS verified,
+         (SELECT count(*) FROM sources WHERE active AND ($1::boolean IS NULL OR ($1 = false AND type <> 'manual') OR $1 = true))::int AS sources,
+         (SELECT count(*) FROM verifications v WHERE EXISTS (
+            SELECT 1 FROM reports r WHERE r.id = v.report_id AND ($1::boolean IS NULL OR r.is_demo = $1)
+         ))::int AS verifications`,
+      [demo ?? null],
     );
     return row ?? empty;
   } catch (e) {

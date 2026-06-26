@@ -129,7 +129,11 @@ licensed bridge). Swapping in the official API touches only
    | `CRON_SECRET` | a random string (Vercel Cron sends it as a Bearer token) |
    | `ANTHROPIC_API_KEY` | optional — better field extraction |
    | `OPENAI_API_KEY` | optional — semantic dedup |
-   | `ANTHROPIC_MODEL`, `EMBEDDING_MODEL`, `X_CONNECTOR_ENABLED` | optional overrides |
+   | `ADMIN_SLUG` | secret URL segment for the admin panel at `/admin/<slug>` (unset ⇒ no admin page) |
+   | `X_CONNECTOR_ENABLED` | `true` to crawl X accounts |
+   | `X_FEED_GATEWAY` | X→RSS gateway base, e.g. a Nitter URL (`https://nitter.net`) or one with a `{handle}` placeholder |
+   | `INGEST_WINDOW_HOURS` | optional — crawl look-back window (default `12`) |
+   | `ANTHROPIC_MODEL`, `EMBEDDING_MODEL` | optional overrides |
 
    > Tip: the **Vercel ↔ Neon integration** (Vercel Marketplace) can set
    > `DATABASE_URL` for you automatically. Always use the **pooled** endpoint —
@@ -139,7 +143,7 @@ licensed bridge). Swapping in the official API touches only
 
 6. **Scheduling (free).** Vercel **Hobby** only allows once-a-day cron, so the
    pipeline is scheduled from **GitHub Actions** instead — see
-   [`.github/workflows/cron.yml`](.github/workflows/cron.yml) (every 15 min).
+   [`.github/workflows/cron.yml`](.github/workflows/cron.yml) (every 6 h).
    Add two repo secrets (Settings → Secrets and variables → Actions):
    | Secret | Value |
    |---|---|
@@ -174,7 +178,7 @@ src/
   components/                Feed, badges, verify panel, filters, ...
 db/schema.sql                Postgres schema (pgvector, pg_trgm, functions, triggers)
 scripts/                     migrate · seed · run-ingest · run-process
-.github/workflows/cron.yml   Free scheduler (hits the cron endpoints every 15 min)
+.github/workflows/cron.yml   Free scheduler (hits the cron endpoints every 6 h)
 ```
 
 ## Roadmap ideas

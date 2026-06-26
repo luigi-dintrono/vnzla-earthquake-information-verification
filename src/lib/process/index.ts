@@ -28,32 +28,40 @@ interface MatchRow {
   similarity: number;
 }
 
-async function findMatch(augmented: Augmented, embedding: number[] | null): Promise<MatchRow | null> {
+async function findMatch(
+  augmented: Augmented,
+  embedding: number[] | null,
+  isDemo: boolean,
+): Promise<MatchRow | null> {
   const rows = embedding
     ? await query<MatchRow>("SELECT id, similarity FROM match_reports($1::vector, $2, $3)", [
         vecLiteral(embedding),
         VECTOR_THRESHOLD,
-        5,
+        10,
       ])
     : await query<MatchRow>("SELECT id, similarity FROM match_reports_trgm($1, $2, $3)", [
         augmented.canonical_text,
         TRGM_THRESHOLD,
-        5,
+        10,
       ]);
 
   if (!rows.length) return null;
 
-  // Same-state guard: don't merge events from different states.
+  // Pull state + is_demo for the candidates to filter in app code (keeps the
+  // SQL match functions generic).
   const ids = rows.map((r) => r.id);
-  const stateRows = await query<{ id: string; state: string | null }>(
-    "SELECT id, state FROM reports WHERE id = ANY($1::uuid[])",
+  const candRows = await query<{ id: string; state: string | null; is_demo: boolean }>(
+    "SELECT id, state, is_demo FROM reports WHERE id = ANY($1::uuid[])",
     [ids],
   );
-  const stateById = new Map(stateRows.map((r) => [r.id, r.state]));
+  const byId = new Map(candRows.map((r) => [r.id, r]));
 
   for (const r of rows) {
-    const candState = stateById.get(r.id);
-    if (augmented.state && candState && augmented.state !== candState) continue;
+    const cand = byId.get(r.id);
+    // Never merge across the demo/real boundary.
+    if (cand && cand.is_demo !== isDemo) continue;
+    // Same-state guard: don't merge events from different states.
+    if (augmented.state && cand?.state && augmented.state !== cand.state) continue;
     return r;
   }
   return null;
@@ -122,8 +130,8 @@ async function createReport(
     `INSERT INTO reports
        (title, summary, canonical_text, category, status, location_text, municipality, state,
         building_name, lat, lng, severity, occurred_at, embedding, report_count, source_count,
-        first_seen_at, last_seen_at)
-     VALUES ($1, $2, $3, $4, 'unverified', $5, $6, $7, $8, $9, $10, $11, $12, $13::vector, 1, 1, $14, $14)
+        first_seen_at, last_seen_at, is_demo)
+     VALUES ($1, $2, $3, $4, 'unverified', $5, $6, $7, $8, $9, $10, $11, $12, $13::vector, 1, 1, $14, $14, $15)
      RETURNING id`,
     [
       augmented.title,
@@ -140,6 +148,7 @@ async function createReport(
       augmented.occurred_at,
       vecLiteral(embedding),
       seen,
+      rawItem.is_demo ?? false,
     ],
   );
   const reportId = row!.id;
@@ -164,9 +173,10 @@ export interface ProcessOutcome {
 }
 
 export async function processOne(rawItem: RawItem): Promise<ProcessOutcome> {
+  const isDemo = rawItem.is_demo ?? false;
   const augmented = await augment(rawItem.raw_text, rawItem.captured_at);
   const embedding = await embed(augmented.canonical_text);
-  const match = await findMatch(augmented, embedding);
+  const match = await findMatch(augmented, embedding, isDemo);
 
   if (match) {
     await attachToReport(match.id, rawItem, augmented, embedding, match.similarity);

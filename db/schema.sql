@@ -91,6 +91,12 @@ create table if not exists reports (
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
 );
+
+-- is_demo: separates the seeded showcase feed (/demo) from the real crawled
+-- feed (/). Idempotent so existing databases pick the columns up on re-migrate.
+alter table reports   add column if not exists is_demo boolean not null default false;
+alter table raw_items add column if not exists is_demo boolean not null default false;
+create index if not exists reports_is_demo_idx on reports (is_demo, last_seen_at desc);
 create index if not exists reports_category_idx on reports (category);
 create index if not exists reports_status_idx on reports (status);
 create index if not exists reports_last_seen_idx on reports (last_seen_at desc);

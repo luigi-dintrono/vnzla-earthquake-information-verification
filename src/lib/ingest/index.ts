@@ -76,8 +76,28 @@ export interface IngestSummary {
   skipped: number;
 }
 
+export interface IngestOptions {
+  /** Only keep items captured within the last N hours (e.g. 12). */
+  sinceHours?: number;
+}
+
+/** Drop items older than the cutoff. Undated items are kept (feeds rarely omit dates). */
+function withinWindow(items: RawItemInput[], cutoffMs: number | null): RawItemInput[] {
+  if (cutoffMs === null) return items;
+  return items.filter((it) => {
+    if (!it.captured_at) return true;
+    const t = Date.parse(it.captured_at);
+    return Number.isNaN(t) || t >= cutoffMs;
+  });
+}
+
 /** Crawl all active sources and stage new items as pending raw_items. */
-export async function runIngest(): Promise<IngestSummary> {
+export async function runIngest(options: IngestOptions = {}): Promise<IngestSummary> {
+  const cutoffMs =
+    options.sinceHours && options.sinceHours > 0
+      ? Date.now() - options.sinceHours * 3_600_000
+      : null;
+
   const sources = await query<Source>("SELECT * FROM sources WHERE active = true");
   const summary: IngestSummary = { sources: 0, fetched: 0, inserted: 0, skipped: 0 };
 
@@ -86,7 +106,7 @@ export async function runIngest(): Promise<IngestSummary> {
     if (!connector) continue;
     summary.sources++;
     try {
-      const items = await connector(source);
+      const items = withinWindow(await connector(source), cutoffMs);
       summary.fetched += items.length;
       const { inserted, skipped } = await insertItems(source, items);
       summary.inserted += inserted;

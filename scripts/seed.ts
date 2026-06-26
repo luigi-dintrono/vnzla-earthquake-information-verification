@@ -183,20 +183,29 @@ const EVENTS: EventSeed[] = [
 ];
 
 async function clean() {
-  // Order respects FKs (cascades cover the rest).
-  for (const table of ["verifications", "report_items", "reports", "raw_items", "sources"]) {
-    await query(`DELETE FROM ${table} WHERE created_at >= '1900-01-01'`);
-  }
+  // Only wipe DEMO data — never touch real crawled reports/items or shared sources.
+  await query("DELETE FROM verifications WHERE report_id IN (SELECT id FROM reports WHERE is_demo)");
+  await query("DELETE FROM report_items WHERE report_id IN (SELECT id FROM reports WHERE is_demo)");
+  await query("DELETE FROM raw_items WHERE is_demo");
+  await query("DELETE FROM reports WHERE is_demo");
 }
 
 async function insertSources(): Promise<Record<SourceKey, string>> {
   const map = {} as Record<SourceKey, string>;
   for (const key of Object.keys(SOURCES) as SourceKey[]) {
     const s = SOURCES[key];
-    const row = await queryOne<{ id: string }>(
-      "INSERT INTO sources (type, name, url, handle) VALUES ($1, $2, $3, $4) RETURNING id",
-      [s.type, s.name, s.url, s.handle ?? null],
+    // Idempotent: reuse an existing source of the same type+name (sources are
+    // shared with the real crawler and managed by seed:x / seed:media).
+    const existing = await queryOne<{ id: string }>(
+      "SELECT id FROM sources WHERE type = $1 AND name = $2 LIMIT 1",
+      [s.type, s.name],
     );
+    const row =
+      existing ??
+      (await queryOne<{ id: string }>(
+        "INSERT INTO sources (type, name, url, handle) VALUES ($1, $2, $3, $4) RETURNING id",
+        [s.type, s.name, s.url, s.handle ?? null],
+      ));
     map[key] = row!.id;
   }
   return map;
@@ -252,8 +261,8 @@ async function main() {
       const capturedAt = new Date(Date.now() - ev.minutesAgo * 60_000 + i * 90_000).toISOString();
 
       const item = await queryOne<RawItem>(
-        `INSERT INTO raw_items (source_id, external_id, author, raw_text, raw_url, lang, captured_at, status)
-         VALUES ($1, $2, $3, $4, $5, 'es', $6, 'pending')
+        `INSERT INTO raw_items (source_id, external_id, author, raw_text, raw_url, lang, captured_at, status, is_demo)
+         VALUES ($1, $2, $3, $4, $5, 'es', $6, 'pending', true)
          RETURNING *`,
         [sources[v.source], `seed-${ev.key}-${i}`, v.author, v.text, v.url ?? null, capturedAt],
       );

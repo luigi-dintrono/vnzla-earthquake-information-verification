@@ -11,8 +11,8 @@ export const maxDuration = 60;
 
 const Body = z.object({
   text: z.string().min(8, "Escribe al menos una frase.").max(4000),
-  url: z.union([z.string().url("URL inválida").max(500), z.literal("")]).nullish(),
-  author: z.string().max(120).nullish(),
+  url: z.string().url("Agrega un enlace válido a la fuente.").max(500),
+  author: z.string().trim().min(1, "Indica el autor o cuenta original.").max(120),
 });
 
 const MANUAL_SOURCE_NAME = "Reporte ciudadano";
@@ -60,7 +60,7 @@ export async function POST(req: Request) {
       `INSERT INTO raw_items (source_id, external_id, author, raw_text, raw_url, lang, captured_at, submitted_by, status)
        VALUES ($1, $2, $3, $4, $5, 'es', now(), $6, 'pending')
        RETURNING id`,
-      [sourceId, external_id, author?.trim() || "Anónimo", text.trim(), url?.trim() || null, voter.hash],
+      [sourceId, external_id, author.trim(), text.trim(), url.trim(), voter.hash],
     );
     itemId = item!.id;
   } catch (e) {

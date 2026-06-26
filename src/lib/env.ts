@@ -12,6 +12,11 @@ const read = (key: string): string | undefined => {
   return value && value.trim() ? value.trim() : undefined;
 };
 
+const readNum = (key: string, fallback: number): number => {
+  const n = Number(read(key));
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
 export const env = {
   // Neon (or any Postgres) connection string — use the POOLED endpoint.
   databaseUrl: read("DATABASE_URL"),
@@ -26,6 +31,17 @@ export const env = {
   cronSecret: read("CRON_SECRET") ?? "dev-insecure-change-me",
 
   xConnectorEnabled: read("X_CONNECTOR_ENABLED") === "true",
+  // Secret URL segment guarding the admin page (/admin/<slug>). Unset = no
+  // admin page is reachable (every slug 404s).
+  adminSlug: read("ADMIN_SLUG"),
+  // How many hours back the scheduled crawl looks. Default 12 = 2× the 6h
+  // cadence, so a delayed/skipped run never leaves a gap. Overlap is free:
+  // already-stored items are deduped on (source_id, external_id).
+  ingestWindowHours: readNum("INGEST_WINDOW_HOURS", 12),
+  // Gateway that turns an X handle into an RSS/Atom feed (e.g. a Nitter base
+  // URL). Use "{handle}" as a placeholder, or just give a base — we append
+  // "/{handle}/rss". Per-source config.feedUrl overrides this.
+  xFeedGateway: read("X_FEED_GATEWAY"),
 } as const;
 
 /** Embedding dimension is fixed in the SQL schema (vector(1536)). */

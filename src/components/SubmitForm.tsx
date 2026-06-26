@@ -22,7 +22,7 @@ export function SubmitForm() {
       const res = await fetch("/api/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: text.trim(), url: url.trim() || null, author: author.trim() || null }),
+        body: JSON.stringify({ text: text.trim(), url: url.trim(), author: author.trim() }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "No se pudo enviar el reporte.");
@@ -71,11 +71,12 @@ export function SubmitForm() {
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
           <label htmlFor="url" className="text-sm font-medium">
-            Enlace de la fuente (opcional)
+            Enlace de la fuente <span style={{ color: "var(--falsehood)" }}>*</span>
           </label>
           <input
             id="url"
             type="url"
+            required
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://…"
@@ -84,10 +85,11 @@ export function SubmitForm() {
         </div>
         <div>
           <label htmlFor="author" className="text-sm font-medium">
-            Autor / cuenta original (opcional)
+            Autor / cuenta original <span style={{ color: "var(--falsehood)" }}>*</span>
           </label>
           <input
             id="author"
+            required
             value={author}
             onChange={(e) => setAuthor(e.target.value)}
             placeholder="@cuenta o nombre del medio"
@@ -95,13 +97,17 @@ export function SubmitForm() {
           />
         </div>
       </div>
+      <p className="text-xs text-muted-foreground">
+        El enlace y el autor son obligatorios: ayudan a la comunidad a verificar de dónde viene la
+        información.
+      </p>
 
       {err && <p className="text-sm" style={{ color: "var(--falsehood)" }}>{err}</p>}
       {done && <p className="text-sm" style={{ color: "var(--verified)" }}>{done}</p>}
 
       <button
         type="submit"
-        disabled={busy || text.trim().length < 8}
+        disabled={busy || text.trim().length < 8 || url.trim().length === 0 || author.trim().length === 0}
         className="inline-flex items-center gap-2 rounded-lg bg-[color:var(--primary)] px-4 py-2.5 text-sm font-semibold text-[color:var(--primary-foreground)] shadow-sm transition hover:opacity-90 disabled:opacity-50"
       >
         <Send className="size-4" />

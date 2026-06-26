@@ -9,6 +9,8 @@
     "lint": "eslint",
     "db:migrate": "tsx scripts/migrate.ts",
     "seed": "tsx scripts/seed.ts",
+    "seed:x": "tsx scripts/seed-x-sources.ts",
+    "seed:media": "tsx scripts/seed-media-sources.ts",
     "ingest": "tsx scripts/run-ingest.ts",
     "process": "tsx scripts/run-process.ts"
   },

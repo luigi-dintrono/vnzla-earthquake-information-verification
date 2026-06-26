@@ -81,6 +81,7 @@ export interface RawItem {
   captured_at: string | null;
   submitted_by: string | null;
   status: ItemStatus;
+  is_demo: boolean;
   report_id: string | null;
   similarity: number | null;
   created_at: string;
@@ -116,6 +117,7 @@ export interface Report {
   last_seen_at: string;
   created_at: string;
   updated_at: string;
+  is_demo: boolean;
 }
 
 export interface Verification {

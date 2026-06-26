@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isCronAuthorized } from "@/lib/cron";
-import { hasDatabase } from "@/lib/env";
+import { env, hasDatabase } from "@/lib/env";
 import { runIngest } from "@/lib/ingest";
 
 export const runtime = "nodejs";
@@ -15,7 +15,7 @@ async function handle(req: Request) {
     return NextResponse.json({ error: "La base de datos no está configurada." }, { status: 503 });
   }
   try {
-    const summary = await runIngest();
+    const summary = await runIngest({ sinceHours: env.ingestWindowHours });
     return NextResponse.json({ ok: true, ...summary });
   } catch (e) {
     console.error("[cron/ingest]", (e as Error).message);
