@@ -16,7 +16,9 @@ import { embed } from "@/lib/process/embed";
  */
 
 const VECTOR_THRESHOLD = 0.82;
-const TRGM_THRESHOLD = 0.42;
+// Trigram is conservative on paraphrased Spanish; 0.3 catches near-dupes while
+// the same-state guard + location-anchored canonical_text limit false merges.
+const TRGM_THRESHOLD = 0.3;
 
 const nowIso = () => new Date().toISOString();
 const vecLiteral = (e: number[] | null) => (e ? JSON.stringify(e) : null);
